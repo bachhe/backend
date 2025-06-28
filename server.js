@@ -5,24 +5,21 @@ const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 const { MongoClient } = require('mongodb');
 const { v4: uuidv4 } = require('uuid');
-const fetch = require('node-fetch'); // add this to fetch from Twitch
+const fetch = require('node-fetch');
 
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-const cors = require('cors');
-
 app.use(cors({
-  origin: 'https://stream11.vercel.app',
+  origin: process.env.FRONTEND_URL,
   credentials: true
 }));
 
-const SECRET_KEY = process.env.SECRET_KEY || require('crypto').randomBytes(32).toString('hex');
+const SECRET_KEY = process.env.SECRET_KEY;
 
 let db;
 
-// 🔌 Connect to MongoDB
 (async function connectDB() {
   const client = new MongoClient(process.env.MONGO_URL, { useUnifiedTopology: true });
   await client.connect();
@@ -66,7 +63,6 @@ async function authMiddleware(req, res, next) {
 
 const router = express.Router();
 
-// ✅ OPTIONS handler for preflight requests
 router.options('*', (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", process.env.FRONTEND_URL);
   res.setHeader("Access-Control-Allow-Credentials", "true");
@@ -75,7 +71,6 @@ router.options('*', (req, res) => {
   res.sendStatus(200);
 });
 
-// ✅ Twitch Login URL
 router.get('/auth/twitch', (req, res) => {
   const clientId = process.env.TWITCH_CLIENT_ID;
   const redirect_uri = `${process.env.BACKEND_URL}/api/auth/twitch/callback`;
@@ -83,7 +78,6 @@ router.get('/auth/twitch', (req, res) => {
   res.json({ url });
 });
 
-// ✅ Twitch Callback
 router.get('/auth/twitch/callback', async (req, res, next) => {
   try {
     const code = req.query.code;
@@ -159,7 +153,6 @@ router.get('/auth/status', (req, res) => {
   }
 });
 
-// ✅ Health check routes
 router.post('/status', async (req, res) => {
   const item = {
     id: uuidv4(),
@@ -177,16 +170,14 @@ router.get('/status', async (req, res) => {
 
 app.use('/api', router);
 
-// 🔥 Global error handler
 app.use((err, req, res, next) => {
   console.error("❌ Error:", err);
   res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
 });
 
-// ✅ Start server (for local dev; Vercel uses serverless export)
 if (require.main === module) {
   const port = process.env.PORT || 8001;
-  app.listen(port, () => console.log(`🚀 Server running on http://localhost:${port}`));
+  app.listen(port, () => console.log(`🚀 Server running on ${process.env.BACKEND_URL}`));
 }
 
 module.exports = app;
