@@ -11,9 +11,10 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-// ✅ CORS setup
+const cors = require('cors');
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'https://stream11.vercel.app',
+  origin: 'https://stream11.vercel.app',
   credentials: true
 }));
 
