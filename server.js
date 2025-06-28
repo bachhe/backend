@@ -2,19 +2,23 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-const { MongoClient, ObjectId } = require('mongodb');
+const cookieParser = require('cookie-parser');
+const { MongoClient } = require('mongodb');
 const { v4: uuidv4 } = require('uuid');
-const dayjs = require('dayjs');
+const fetch = require('node-fetch'); // add this to fetch from Twitch
 
 const app = express();
 app.use(express.json());
+app.use(cookieParser());
 
+// ✅ CORS setup
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'https://stream11.vercel.app',
   credentials: true
 }));
 
 const SECRET_KEY = process.env.SECRET_KEY || require('crypto').randomBytes(32).toString('hex');
+
 let db;
 
 // 🔌 Connect to MongoDB
@@ -23,17 +27,16 @@ let db;
   await client.connect();
   db = client.db(process.env.DB_NAME);
   console.log("✅ MongoDB connected");
+
   process.on('SIGINT', () => {
     client.close();
     console.log("🛑 MongoDB disconnected");
     process.exit();
   });
 })();
+
 function createToken(data) {
-  return jwt.sign({
-    twitch_id: data.twitch_id,
-    username: data.username
-  }, SECRET_KEY, { expiresIn: '14d' });
+  return jwt.sign({ twitch_id: data.twitch_id, username: data.username }, SECRET_KEY, { expiresIn: '14d' });
 }
 
 function verifyToken(token) {
@@ -62,6 +65,16 @@ async function authMiddleware(req, res, next) {
 
 const router = express.Router();
 
+// ✅ OPTIONS handler for preflight requests
+router.options('*', (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", process.env.FRONTEND_URL);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.sendStatus(200);
+});
+
+// ✅ Twitch Login URL
 router.get('/auth/twitch', (req, res) => {
   const clientId = process.env.TWITCH_CLIENT_ID;
   const redirect_uri = `${process.env.BACKEND_URL}/api/auth/twitch/callback`;
@@ -69,42 +82,83 @@ router.get('/auth/twitch', (req, res) => {
   res.json({ url });
 });
 
+// ✅ Twitch Callback
 router.get('/auth/twitch/callback', async (req, res, next) => {
   try {
     const code = req.query.code;
     if (!code) throw { status: 400, message: "Code missing" };
-    // Exchange code, fetch user data (using fetch/httpx equivalent)
-    // Upsert into db.users ...
-    const token = createToken({ twitch_id, username });
-    res.cookie('session_token', token, {
-      httpOnly: true,
-      secure: false,
-      maxAge: 14 * 24 * 60 * 60 * 1000,
-      sameSite: 'lax'
+
+    const redirect_uri = `${process.env.BACKEND_URL}/api/auth/twitch/callback`;
+    const tokenResponse = await fetch('https://id.twitch.tv/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: process.env.TWITCH_CLIENT_ID,
+        client_secret: process.env.TWITCH_CLIENT_SECRET,
+        code,
+        grant_type: 'authorization_code',
+        redirect_uri
+      })
     });
+
+    const tokenData = await tokenResponse.json();
+    const access_token = tokenData.access_token;
+
+    const userResponse = await fetch('https://api.twitch.tv/helix/users', {
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+        'Client-Id': process.env.TWITCH_CLIENT_ID
+      }
+    });
+
+    const userData = (await userResponse.json()).data[0];
+    const twitch_id = userData.id;
+    const username = userData.login;
+
+    const userRecord = {
+      twitch_id,
+      username,
+      display_name: userData.display_name,
+      email: userData.email,
+      profile_image_url: userData.profile_image_url,
+      access_token,
+      total_points: 1000,
+      created_at: new Date(),
+      last_login: new Date()
+    };
+
+    await db.collection('users').updateOne(
+      { twitch_id },
+      { $set: userRecord },
+      { upsert: true }
+    );
+
+    const session_token = createToken({ twitch_id, username });
+    res.cookie('session_token', session_token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'lax',
+      maxAge: 14 * 24 * 60 * 60 * 1000
+    });
+
     res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.post('/predictions', authMiddleware, async (req, res, next) => {
-  const { game_type, title, option_a, option_b, duration_minutes = 10 } = req.body;
-  const now = new Date();
-  const prediction = {
-    id: uuidv4(),
-    twitch_id: req.user.twitch_id,
-    username: req.user.username,
-    game_type, title, option_a, option_b,
-    status: 'active',
-    created_at: now,
-    ends_at: new Date(now.getTime() + duration_minutes * 60000),
-    votes_a: 0, votes_b: 0, total_votes: 0, points_distributed: 0
-  };
-  await db.collection('predictions').insertOne(prediction);
-  res.json(prediction);
+router.get('/auth/status', (req, res) => {
+  try {
+    const token = req.cookies?.session_token;
+    if (!token) return res.json({ authenticated: false });
+    verifyToken(token);
+    res.json({ authenticated: true });
+  } catch (err) {
+    res.json({ authenticated: false });
+  }
 });
 
-// Add GET, vote, resolve, etc... following same approach
-
+// ✅ Health check routes
 router.post('/status', async (req, res) => {
   const item = {
     id: uuidv4(),
@@ -122,5 +176,16 @@ router.get('/status', async (req, res) => {
 
 app.use('/api', router);
 
-const port = process.env.PORT || 8001;
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+// 🔥 Global error handler
+app.use((err, req, res, next) => {
+  console.error("❌ Error:", err);
+  res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
+});
+
+// ✅ Start server (for local dev; Vercel uses serverless export)
+if (require.main === module) {
+  const port = process.env.PORT || 8001;
+  app.listen(port, () => console.log(`🚀 Server running on http://localhost:${port}`));
+}
+
+module.exports = app;
